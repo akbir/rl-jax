@@ -79,7 +79,7 @@ class PPO:
 
   def learner_step(self, params, data, learner_state, unused_key) -> Tuple[Params, LearnerState]:
     # update critic
-    dl_dc = jax.grad(self._critic_loss)(params.critic, data)
+    dl_dc = jax.grad(self._critic_loss)(params.critic, *data)
     critic_updates, critic_opt_state = self._critic_optimizer.update(dl_dc, learner_state.critic_opt_state)
     critic_params = optax.apply_updates(params.crtic, critic_updates)
 
@@ -92,10 +92,10 @@ class PPO:
       Params(actor_params, critic_params, params.crtic_params),
       LearnerState(learner_state.count + 1, actor_opt_state, critic_opt_state))
 
-  def _critic_loss(self, critic_params, *data):
-    obs_tm1, a_tm1, r_t, discount_t, obs_t = data
-    target = data.r_t + discount_t * self._critic.apply(critic_params, obs_tm1)
-    return jnp.mean(jax.lax.stop_gradient(target) - self._critic.apply(critic_params, obs_t))
+  def _critic_loss(self, critic_params, obs_tm1, a_tm1, r_t, discount_t, obs_t):
+    v_tm1 = self._critic.apply(critic_params, obs_tm1)
+    target_tm1 = r_t + discount_t * v_tm1
+    return jnp.mean(jax.lax.stop_gradient(target_tm1) - self._critic.apply(critic_params, obs_t)[a_tm1])
 
   def _actor_loss(self, actor_params, *data):
     pass

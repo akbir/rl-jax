@@ -9,6 +9,7 @@ def main(unused_arg):
   env = gym.make('CartPole-v0')
   accumulator = ReplayBuffer(500)
   batch_size = 32
+  discount_factor = 0.99
 
   agent = PPO(observation_spec=4, action_spec=2, learning_rate=0.001)
 
@@ -39,9 +40,7 @@ def main(unused_arg):
       # learning.
       if accumulator.is_ready(batch_size):
         params, learner_state = agent.learner_step(
-            params, accumulator.sample(batch_size), learner_state, next(rng))
-
-
+            params, accumulator.sample(batch_size, discount_factor), learner_state, next(rng))
     print(f"Episode finished after {actor_state.count} timesteps")
   env.close()
 
