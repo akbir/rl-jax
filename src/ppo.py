@@ -8,7 +8,7 @@ import optax
 from haiku import nets
 from rlax._src import distributions
 
-Params = collections.namedtuple("Params", "actor critic old_actor")
+Params = collections.namedtuple("Params", "actor critic")
 ActorState = collections.namedtuple("ActorState", "count")
 LearnerState = collections.namedtuple("LearnerState", "count actor_opt_state critic_opt_state")
 ActorOutput = collections.namedtuple("ActorOutput", "action log_prob advantage")
@@ -18,7 +18,7 @@ def build_actor_network(num_actions: int) -> hk.Transformed:
   def network(obs):
     network = hk.Sequential(
         [hk.Flatten(),
-         nets.MLP([64, num_actions]),
+         nets.MLP([12, 12, 12, num_actions]),
          ])
     return network(obs)
   return hk.without_apply_rng(hk.transform(network, apply_rng=True))
@@ -28,7 +28,7 @@ def build_critic_network(num_actions: int) -> hk.Transformed:
   def network(obs):
     network = hk.Sequential(
         [hk.Flatten(),
-         nets.MLP([64, 1])])
+         nets.MLP([12, 12, 12, 1])])
     return network(obs)
   return hk.without_apply_rng(hk.transform(network, apply_rng=True))
 
@@ -53,7 +53,7 @@ class PPO:
     sample_input = jnp.zeros((0, self._observation_spec))
     actor_params = self._actor.init(key, sample_input)
     critic_params = self._critic.init(key, sample_input)
-    return Params(actor_params, critic_params, actor_params)
+    return Params(actor_params, critic_params)
 
   def initial_actor_state(self) -> ActorState:
     actor_count = jnp.zeros((), dtype=jnp.float32)
@@ -76,12 +76,13 @@ class PPO:
     return action, logits[action], ActorState(actor_state.count + 1)
 
   def learner_step(self, params, data, learner_state, unused_key) -> Tuple[Params, LearnerState]:
-    obs_tm1, a_tm1, logpi_t, r_t, discount_t, obs_t = data
+    obs_tm1, a_tm1, logpi_tm1, r_t, discount_t, obs_t = data
     # calculate advantage A(s,a) = R + yV(s') - V(s)
     adv = jax.lax.stop_gradient(
       jnp.expand_dims(r_t, 1)
-      + jnp.expand_dims(discount_t, 1) * self._critic.apply(params.critic, obs_tm1)
-      - self._critic.apply(params.critic, obs_t)
+      + jnp.expand_dims(discount_t, 1)
+      * self._critic.apply(params.critic, obs_t)
+      - self._critic.apply(params.critic, obs_tm1)
     )
     # update actor
     dl_da = jax.grad(self._actor_loss)(params.actor, adv, 0.2, *data)
@@ -94,18 +95,17 @@ class PPO:
     critic_params = optax.apply_updates(params.critic, critic_updates)
 
     return (
-      Params(actor_params, critic_params, params.critic),
+      Params(actor_params, critic_params),
       LearnerState(learner_state.count + 1, actor_opt_state, critic_opt_state))
 
   def _critic_loss(self, critic_params, obs_tm1, a_t, logp_t, r_t, discount_t, obs_t):
-    target_tm1 = r_t + discount_t * self._critic.apply(critic_params, obs_tm1)
-    return jnp.mean(jax.lax.stop_gradient(target_tm1) - self._critic.apply(critic_params, obs_t))
+    target = jax.lax.stop_gradient(r_t + discount_t * self._critic.apply(critic_params, obs_t))
+    return jnp.square((target - self._critic.apply(critic_params, obs_tm1))**2).mean()
 
-  def _actor_loss(self, actor_params, adv, eps, obs_tm1, a_t, logp_t, r_t, discount_t, obs_t):
+  def _actor_loss(self, actor_params, adv, eps, obs_tm1, a_t, logpi_tm1, r_t, discount_t, obs_t):
     logits_t = self._actor.apply(actor_params, obs_t)
-    logpi_tm1 = distributions.softmax().logprob(a_t, logits_t)
-
-    ratio = jnp.exp(logpi_tm1 - logp_t)
+    logpi_t = distributions.softmax().logprob(a_t, logits_t)
+    ratio = 1 * jnp.exp(logpi_t-logpi_tm1)
     clip = jnp.clip(ratio, 1.0 - eps, 1.0 + eps) * adv
-    return jnp.mean(jnp.minimum(ratio * adv, clip * adv))
+    return jnp.minimum(ratio * adv, clip * adv).mean()
 

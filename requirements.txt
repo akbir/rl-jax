@@ -1,3 +1,4 @@
 gym
 dm-haiku
 optax
+rlax
