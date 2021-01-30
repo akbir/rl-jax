@@ -1,4 +1,4 @@
-from typing import Optional, NamedTuple
+from typing import Optional, NamedTuple, Tuple
 
 import jax.numpy as jnp
 import random
@@ -13,19 +13,19 @@ class EnvOutput(NamedTuple):
   info: Optional[str] = None
 
 class Trajectory(NamedTuple):
-  """A trajectory is a sequence of observations, actions, rewards, discounts.
+  """A trajectory is a sequence of observations, ... etc.
   Note: `observations` should be of length T+1 to make up the final transition.
   """
   observations: jnp.ndarray  # [T + 1, ...]
   actions: jnp.ndarray  # [T]
-  logpi: jnp.ndarray  # [T]
+  pi: jnp.ndarray  # [T]
   gae: jnp.ndarray  # [T]
   rtg: jnp.ndarray  # [T]
   rewards: jnp.ndarray  # [T]
   discounts: jnp.ndarray  # [T]
 
 class SequenceBuffer:
-  """A simple buffer for accumulating trajectories."""
+  """A buffer for accumulating trajectories."""
   _observations: jnp.ndarray
   _actions: jnp.ndarray
   _rewards: jnp.ndarray
@@ -38,27 +38,28 @@ class SequenceBuffer:
   def __init__(
       self,
       obs_spec: jnp.array,
-      max_sequence_length: int,
+      action_spec: jnp.array,
+      max_length: int,
   ):
     """Pre-allocates buffers of numpy arrays to hold the sequences."""
     self._observations = np.zeros(
-        shape=(max_sequence_length + 1, obs_spec))
+        shape=(max_length + 1, obs_spec))
     self._values = np.zeros(
-        shape=max_sequence_length, dtype=jnp.float32)
+        shape=max_length, dtype=jnp.float32)
     self._actions = np.zeros(
-        shape=max_sequence_length, dtype=jnp.float32)
-    self._logpi = np.zeros(
-        shape=max_sequence_length, dtype=jnp.float32)
-    self._rewards = np.zeros(max_sequence_length, dtype=jnp.float32)
-    self._discounts = np.zeros(max_sequence_length, dtype=jnp.float32)
-    self._max_sequence_length = max_sequence_length
+        shape=max_length, dtype=jnp.float32)
+    self._pi = np.zeros(
+        shape=(max_length, action_spec))
+    self._rewards = np.zeros(max_length, dtype=jnp.float32)
+    self._discounts = np.zeros(max_length, dtype=jnp.float32)
+    self._max_sequence_length = max_length
 
   def append(
       self,
       timestep: EnvOutput,
       value: int,
       action: int,
-      log_pi: int,
+      pi: int,
   ):
     """Appends an observation, action, reward, and discount to the buffer."""
     if self.full():
@@ -70,11 +71,11 @@ class SequenceBuffer:
       self._observations[self._t] = timestep.observation
       self._needs_reset = False
 
-    # Append (o, a, r, d) to the sequence buffer.
+    # Append (o, v, a, pi, r, d) to the sequence buffer.
     self._observations[self._t + 1] = timestep.observation
     self._values[self._t] = value
     self._actions[self._t] = action
-    self._logpi[self._t] = log_pi
+    self._pi[self._t] = pi
     self._rewards[self._t] = timestep.reward
     self._discounts[self._t] = timestep.discount
     self._t += 1
@@ -101,13 +102,13 @@ class SequenceBuffer:
       gae[t] = delta + gamma * lmbda * (gae[t + 1] if t + 1 < self._t else 0)
 
     trajectory = Trajectory(
-        self._observations[:self._t + 1],
-        self._actions[:self._t],
-        self._logpi[:self._t],
-        gae,
-        rtg,
-        self._rewards[:self._t],
-        self._discounts[:self._t],
+      self._observations[:self._t + 1],
+      self._actions[:self._t],
+      self._pi[:self._t],
+      gae,
+      rtg,
+      self._rewards[:self._t],
+      self._discounts[:self._t],
     )
     self._t = 0  # Mark sequences as consumed.
     self._needs_reset = True
@@ -121,51 +122,46 @@ class SequenceBuffer:
     """Returns whether or not the trajectory buffer is full."""
     return self._t == self._max_sequence_length
 
-
 class ReplayBuffer(object):
-  """A simple replay buffer."""
-
+  """A buffer to store trajectories and apply normalisation"""
   def __init__(self, capacity):
-    self._prev = None
-    self._action = None
-    self._logpi = None
-    self._adv = None
-    self._latest = None
+    self._sum = 0
+    self._squared_sum = 0
     self.buffer = collections.deque(maxlen=capacity)
     self.capacity = capacity
 
-  def push(self, env_output, action, logpi):
-    self._prev = self._latest
-    self._action = action
-    self._logpi = logpi
-    self._latest = env_output
-
-    if action is not None:
+  def add_trajectory(self, traj: Trajectory) -> None:
+    for t in range(1, len(traj.actions)):
+      # add to buffer
       self.buffer.append(
-          (self._prev.observation, self._action, self._logpi, self._latest.reward,
-           self._latest.discount, self._latest.observation))
+        (traj.observations[t - 1], traj.actions[t], traj.pi[t], traj.gae[t],
+         traj.rtg[t], traj.discounts[t], traj.observations[t])
+      )
+      # for normalisation stats
+      self._sum += traj.gae[t]
+      self._squared_sum += traj.gae[t] * traj.gae[t]
 
-  def sample(self, batch_size):
-    obs_tm1, a_tm1, logpi_t, adv_t, rtg_t, discount_t, obs_t = zip(
+  def sample(self, batch_size: int) -> Tuple:
+    obs_tm1, a_tm1, pi_tm1, adv_t, rtg_t, discount_t, obs_t = zip(
         *random.sample(self.buffer, batch_size))
 
-    return (jnp.stack(obs_tm1), jnp.asarray(a_tm1), jnp.asarray(logpi_t), jnp.asarray(adv_t),
-            jnp.asarray(rtg_t), jnp.asarray(discount_t), jnp.stack(obs_t))
+    return (jnp.stack(obs_tm1),
+            jnp.asarray(a_tm1),
+            jnp.stack(pi_tm1),
+            self._normalize(jnp.asarray(adv_t)),
+            jnp.asarray(rtg_t),
+            jnp.asarray(discount_t),
+            jnp.stack(obs_t))
 
-  def is_ready(self, batch_size):
+  def _normalize(self, values: jnp.ndarray) -> jnp.ndarray:
+    _mean = self._sum/len(self.buffer)
+    _std = np.sqrt(self._squared_sum / len(self.buffer) - _mean ** 2)
+    return (values - _mean) / (_std + 1e-8)
+
+  def is_ready(self, batch_size) -> bool:
     return batch_size <= len(self.buffer)
 
-  def add_trajectory(self, traj: Trajectory):
-    for t in range(1, len(traj.actions)):
-      self.buffer.append(
-        (traj.observations[t-1], traj.actions[t], traj.logpi[t], traj.gae[t],
-          traj.rtg[t], traj.discounts[t], traj.observations[t])
-      )
-
   def reset(self):
-    self._prev = None
-    self._action = None
-    self._logpi = None
-    self._adv = None
-    self._latest = None
+    self._sum = 0
+    self._squared_sum = 0
     self.buffer = collections.deque(maxlen=self.capacity)
