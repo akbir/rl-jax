@@ -13,19 +13,19 @@ def main(unused_arg):
   seed = 0
   env = gym.make('CartPole-v1')
   mini_batch_size = 1024
-  iterations = 400
+  iterations = 200
   num_epochs = 5
   accumulator = ReplayBuffer(2 * mini_batch_size * num_epochs)
   eval_episodes = 3
   clip = 0.1
-  beta = 0.01
+  beta = 0.
   lmbda = 0.95
   discount_factor = 0.99
   horizon = 50
 
   # Logging
   now = datetime.now()
-  experiment_name = "PPO Run:" + now.strftime("%m/%d/%Y, %H:%M:%S") + 'with reward normalisation refactor'
+  experiment_name = "PPO Run:" + now.strftime("%m/%d/%Y, %H:%M:%S") + 'No entropy regularisation'
   logdir = os.path.join("../logs/", "PPO", experiment_name)
   writer = SummaryWriter(logdir=logdir)
 
@@ -40,7 +40,6 @@ def main(unused_arg):
   learner_state = agent.initial_learner_state(params, clip, beta)
 
   for episode in range(iterations):
-
     # Exploring
     while not accumulator.is_ready(2 *num_epochs * mini_batch_size):
       obs = env.reset()

@@ -105,10 +105,10 @@ class PPO:
       Params(actor_params, critic_params),
       LearnerState(learner_state.count + 1, actor_opt_state, critic_opt_state, learner_state.clip, learner_state.beta)
     )
+
   def _critic_loss(self, critic_params, obs_tm1, target):
-    # target policy is rewards-to-go
     q_tm1 = self._critic.apply(critic_params, obs_tm1)
-    return jnp.power(jax.lax.stop_gradient(target) - q_tm1, 2).mean()
+    return jnp.power(target - q_tm1, 2).mean()
 
   def _actor_loss(self, actor_params, clip, beta, obs_tm1, a_tm1, pi_t, advs, obs_t):
     return self._ppo_loss(actor_params, clip, obs_tm1, a_tm1, pi_t, advs) \
