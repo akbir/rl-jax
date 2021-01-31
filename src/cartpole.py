@@ -13,13 +13,18 @@ from src.ppo import PPO, LearnerState
 def main(unused_arg):
   seed = 0
   env = bsuite.load_from_id('cartpole/0')
-  mini_batch_size = 4096
+  observation_spec = 6
+  action_spec = 3
+
+  # Parameters
+  batch_size = 4096
   iterations = 200
   num_epochs = 5
-  accumulator = ReplayBuffer(2 * mini_batch_size * num_epochs)
   eval_episodes = 3
+
   clip = 0.1
   beta = 0.01
+  clip_decay = beta_decay = 0.999
   lmbda = 0.99
   discount_factor = 0.995
   horizon = 400
@@ -30,52 +35,48 @@ def main(unused_arg):
   logdir = os.path.join("../logs/", "PPO", experiment_name)
   writer = SummaryWriter(logdir=logdir)
 
-  observation_spec = 6
-  action_spec = 3
   # Agent
   agent = PPO(observation_spec=observation_spec,
               action_spec=action_spec,
               actor_learning_rate=0.001,
               critic_learning_rate=0.01)
 
+  # Accumulators
+  accumulator = ReplayBuffer(2 * batch_size * num_epochs)
+  buffer = SequenceBuffer(obs_spec=observation_spec, action_spec=action_spec, max_length=horizon)
+
   rng = hk.PRNGSequence(jax.random.PRNGKey(seed))
   params = agent.initial_params(next(rng))
-  learner_state = agent.initial_learner_state(params, clip, beta)
+  learner_state = agent.initial_learner_state(params, clip, beta, clip_decay, beta_decay)
 
   for episode in range(iterations):
     # Exploring
-    while not accumulator.is_ready(2 *num_epochs * mini_batch_size):
+    while not accumulator.is_ready(2 * num_epochs * batch_size):
       timestep = env.reset()
       actor_state = agent.initial_actor_state()
-      seq = SequenceBuffer(obs_spec=observation_spec, action_spec=action_spec, max_length=horizon)
-      seq.append(timestep, None, None, None)
+      buffer.append(timestep, None, None, None)
 
       while not timestep.last():
         # agent - environment interaction
         value, action, pi, actor_state = agent.actor_step(params, timestep, actor_state, next(rng), False)
         timestep = env.step(action.item())
         # store in current sequence
-        seq.append(timestep, value, action, pi)
+        buffer.append(timestep, value, action, pi)
 
-        if seq.full() or timestep.last():
+        if buffer.full() or timestep.last():
           # add to ReplayBuffer
-          accumulator.add_trajectory(seq.drain(discount_factor, lmbda))
+          accumulator.add_trajectory(buffer.drain(discount_factor, lmbda))
 
     # Learning
     for _ in range(num_epochs):
       actor_loss, critic_loss, entropy, params, learner_state = agent.learner_step(
-          params, accumulator.sample(mini_batch_size), learner_state, next(rng))
+          params, accumulator.sample(batch_size), learner_state, next(rng))
 
       writer.add_scalar(f'PPO/actor loss', actor_loss, learner_state.count)
       writer.add_scalar(f'PPO/critic loss', critic_loss, learner_state.count)
       writer.add_scalar(f'PPO/entropy loss', entropy, learner_state.count)
 
     accumulator.reset()
-    learner_state = LearnerState(learner_state.count,
-                                 learner_state.actor_opt_state,
-                                 learner_state.critic_opt_state,
-                                 learner_state.beta*0.999,
-                                 learner_state.clip*0.999)
     # Evaluation
     returns = 0.
     for eval_num in range(eval_episodes):
@@ -95,5 +96,6 @@ def main(unused_arg):
     print(f"Iteration:{episode:4d} Average returns: {avg_returns:.2f}")
   writer.close()
   env.close()
+
 if __name__ == "__main__":
   main(None)

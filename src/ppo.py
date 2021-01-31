@@ -10,8 +10,9 @@ from rlax import softmax
 
 Params = collections.namedtuple("Params", "actor critic")
 ActorState = collections.namedtuple("ActorState", "count")
-LearnerState = collections.namedtuple("LearnerState", "count actor_opt_state critic_opt_state clip beta")
 ActorOutput = collections.namedtuple("ActorOutput", "action log_prob advantage")
+LearnerState = collections.namedtuple("LearnerState",
+                                      "count actor_opt_state critic_opt_state clip beta clip_decay learner_decay")
 
 def build_actor_network(num_actions: int) -> hk.Transformed:
   def network(obs):
@@ -61,11 +62,11 @@ class PPO:
     actor_count = jnp.zeros((), dtype=jnp.float32)
     return ActorState(actor_count)
 
-  def initial_learner_state(self, params, clip, beta) -> LearnerState:
+  def initial_learner_state(self, params, clip, beta, clip_decay, beta_decay) -> LearnerState:
     learner_count = jnp.zeros((), dtype=jnp.float32)
     actor_opt_state = self._actor_optimizer.init(params.actor)
     critic_opt_state = self._critic_optimizer.init(params.critic)
-    return LearnerState(learner_count, actor_opt_state, critic_opt_state, clip, beta)
+    return LearnerState(learner_count, actor_opt_state, critic_opt_state, clip, beta, clip_decay, beta_decay)
 
   def actor_step(self, params, env_output, actor_state, key, evaluation)\
           -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray, ActorState]:
@@ -103,7 +104,11 @@ class PPO:
     return (
       ppo_loss, critic_loss, entropy,
       Params(actor_params, critic_params),
-      LearnerState(learner_state.count + 1, actor_opt_state, critic_opt_state, learner_state.clip, learner_state.beta)
+      LearnerState(learner_state.count + 1,
+                   actor_opt_state,
+                   critic_opt_state,
+                   learner_state._clip_decay * learner_state.clip,
+                   learner_state._beta_decay * learner_state.beta)
     )
 
   def _critic_loss(self, critic_params, obs_tm1, target):
