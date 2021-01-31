@@ -82,7 +82,7 @@ class SequenceBuffer:
 
     # Don't accumulate sequences that cross episode boundaries.
     # It is up to the caller to drain the buffer in this case.
-    if timestep.done:
+    if timestep.last():
       self._needs_reset = True
 
   def drain(self, gamma: float, lmbda: float) -> Trajectory:
@@ -107,7 +107,7 @@ class SequenceBuffer:
       self._pi[:self._t],
       gae,
       rtg,
-      self._rewards[:self._t],
+      gamma * self._rewards[:self._t],
       self._discounts[:self._t],
     )
     self._t = 0  # Mark sequences as consumed.
